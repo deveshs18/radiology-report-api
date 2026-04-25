@@ -1,11 +1,11 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
+from fastapi import FastAPI, Request
 from typing import List, Optional
+from pydantic import BaseModel
 
 app = FastAPI(title="Radiology Report Generator")
 
 # -------------------------
-# Models
+# Models (kept for internal use)
 # -------------------------
 
 class Finding(BaseModel):
@@ -16,10 +16,6 @@ class Finding(BaseModel):
 
 class Scan(BaseModel):
     findings: List[Finding]
-
-class ReportRequest(BaseModel):
-    current_scan: Scan
-    previous_scans: List[Scan]
 
 # -------------------------
 # Helpers
@@ -32,12 +28,18 @@ SEVERITY_ORDER = {
     "severe": 3
 }
 
+def normalize_severity(sev):
+    if not sev:
+        return "mild"
+    sev = str(sev).lower()
+    return sev if sev in SEVERITY_ORDER else "mild"
+
 def finding_key(f: Finding):
     return f"{f.organ.lower()}::{f.condition.lower()}"
 
 def compare_findings(current: Finding, previous: Finding):
-    current_sev = SEVERITY_ORDER.get(current.severity.lower(), 0)
-    prev_sev = SEVERITY_ORDER.get(previous.severity.lower(), 0)
+    current_sev = SEVERITY_ORDER.get(normalize_severity(current.severity), 1)
+    prev_sev = SEVERITY_ORDER.get(normalize_severity(previous.severity), 1)
 
     # Compare severity
     if current_sev > prev_sev:
@@ -86,7 +88,7 @@ def generate_report(current_scan: Scan, previous_scans: List[Scan]):
                 f"New {current_finding.condition} identified in the {current_finding.organ}."
             )
             recommendations.append(
-                f"Further evaluation of new {current_finding.condition} in the {current_finding.organ} recommended."
+                f"Further evaluation recommended for new {current_finding.condition} in the {current_finding.organ}."
             )
 
         else:
@@ -110,7 +112,7 @@ def generate_report(current_scan: Scan, previous_scans: List[Scan]):
                     f"{current_finding.condition} in the {current_finding.organ} has worsened compared to prior scan."
                 )
                 recommendations.append(
-                    f"Close follow-up for worsening {current_finding.condition} in the {current_finding.organ}."
+                    f"Close monitoring recommended for worsening {current_finding.condition}."
                 )
             else:
                 impression_output.append(
@@ -132,9 +134,59 @@ def generate_report(current_scan: Scan, previous_scans: List[Scan]):
     }
 
 # -------------------------
-# API Endpoint
+# Flexible API Endpoint (FIXES 422)
 # -------------------------
 
 @app.post("/generate-report")
-def generate_radiology_report(request: ReportRequest):
-    return generate_report(request.current_scan, request.previous_scans)
+async def generate_radiology_report(request: Request):
+    try:
+        data = await request.json()
+
+        # Handle flexible input
+        current_scan_data = data.get("current_scan", {})
+        previous_scans_data = data.get("previous_scans", [])
+
+        if not isinstance(previous_scans_data, list):
+            previous_scans_data = []
+
+        # Extract current findings
+        current_findings_raw = current_scan_data.get("findings", [])
+
+        # Extract previous findings
+        previous_findings_raw = []
+        for scan in previous_scans_data:
+            if isinstance(scan, dict):
+                previous_findings_raw.extend(scan.get("findings", []))
+
+        # Safe conversion
+        def safe_finding(f):
+            return Finding(
+                organ=str(f.get("organ", "unknown")),
+                condition=str(f.get("condition", "unknown")),
+                severity=normalize_severity(f.get("severity")),
+                size_mm=f.get("size_mm")
+            )
+
+        current_findings = [safe_finding(f) for f in current_findings_raw if isinstance(f, dict)]
+        previous_findings = [safe_finding(f) for f in previous_findings_raw if isinstance(f, dict)]
+
+        current_scan = Scan(findings=current_findings)
+        previous_scans = [Scan(findings=previous_findings)]
+
+        return generate_report(current_scan, previous_scans)
+
+    except Exception as e:
+        return {
+            "findings": [],
+            "impression": ["Unable to process input"],
+            "recommendations": [],
+            "error": str(e)
+        }
+
+# -------------------------
+# Health check (optional but helpful)
+# -------------------------
+
+@app.get("/")
+def health_check():
+    return {"status": "API is running"}
