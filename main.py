@@ -1,114 +1,125 @@
 from fastapi import FastAPI, Request
 from typing import List, Optional
-from pydantic import BaseModel
 
-app = FastAPI(title="Radiology Report Generator")
+app = FastAPI()
 
-class Finding(BaseModel):
-    organ: str
-    condition: str
-    severity: str
-    size_mm: Optional[float] = None
+# -----------------------------
+# Helper functions
+# -----------------------------
 
-class Scan(BaseModel):
-    findings: List[Finding]
-
-SEVERITY_ORDER = {
+SEVERITY_RANK = {
     "none": 0,
     "mild": 1,
     "moderate": 2,
     "severe": 3
 }
 
-def normalize_severity(sev):
-    if not sev:
+def normalize_severity(value):
+    if not value:
         return "mild"
-    sev = str(sev).lower()
-    return sev if sev in SEVERITY_ORDER else "mild"
+    value = str(value).lower()
+    return value if value in SEVERITY_RANK else "mild"
 
-def finding_key(f: Finding):
-    return f"{f.organ.lower()}::{f.condition.lower()}"
 
-def compare_findings(current: Finding, previous: Finding):
-    current_sev = SEVERITY_ORDER.get(normalize_severity(current.severity), 1)
-    prev_sev = SEVERITY_ORDER.get(normalize_severity(previous.severity), 1)
+def get_key(finding):
+    organ = finding.get("organ", "").lower()
+    condition = finding.get("condition", "").lower()
+    return f"{organ}::{condition}"
 
-    if current_sev > prev_sev:
+
+def compare(current, previous):
+    curr_sev = SEVERITY_RANK.get(normalize_severity(current.get("severity")), 1)
+    prev_sev = SEVERITY_RANK.get(normalize_severity(previous.get("severity")), 1)
+
+    # severity comparison
+    if curr_sev > prev_sev:
         return "worsened"
-    elif current_sev < prev_sev:
+    if curr_sev < prev_sev:
         return "improved"
 
-    if current.size_mm is not None and previous.size_mm is not None:
-        if current.size_mm > previous.size_mm:
-            return "worsened"
-        elif current.size_mm < previous.size_mm:
-            return "improved"
+    # size comparison (if available)
+    curr_size = current.get("size_mm")
+    prev_size = previous.get("size_mm")
+
+    if curr_size is not None and prev_size is not None:
+        try:
+            if float(curr_size) > float(prev_size):
+                return "worsened"
+            if float(curr_size) < float(prev_size):
+                return "improved"
+        except:
+            pass
 
     return "stable"
 
-def generate_report(current_scan: Scan, previous_scans: List[Scan]):
-    previous_map = {}
 
-    for scan in previous_scans:
-        for f in scan.findings:
-            previous_map[finding_key(f)] = f
+# -----------------------------
+# Core logic
+# -----------------------------
+
+def process_case(case):
+    current = case.get("current_scan", {})
+    previous = case.get("previous_scans", [])
+
+    current_findings = current.get("findings", []) if isinstance(current, dict) else []
+    previous_findings = []
+
+    # flatten previous scans
+    if isinstance(previous, list):
+        for scan in previous:
+            if isinstance(scan, dict):
+                previous_findings.extend(scan.get("findings", []))
+
+    # build lookup map
+    prev_map = {}
+    for f in previous_findings:
+        if isinstance(f, dict):
+            prev_map[get_key(f)] = f
 
     findings_output = []
     impression_output = []
     recommendations = []
 
-    for curr in current_scan.findings:
-        key = finding_key(curr)
+    for f in current_findings:
+        if not isinstance(f, dict):
+            continue
 
-        if key not in previous_map:
+        key = get_key(f)
+
+        if key not in prev_map:
             status = "new"
-            findings_output.append({
-                "organ": curr.organ,
-                "condition": curr.condition,
-                "status": status,
-                "severity": curr.severity,
-                "size_mm": curr.size_mm
-            })
             impression_output.append(
-                f"New {curr.condition} identified in the {curr.organ}."
+                f"New {f.get('condition', 'finding')} in {f.get('organ', 'unknown organ')}."
             )
             recommendations.append(
-                f"Further evaluation recommended for new {curr.condition} in the {curr.organ}."
+                f"Follow-up suggested for new {f.get('condition', 'finding')}."
             )
         else:
-            prev = previous_map[key]
-            status = compare_findings(curr, prev)
+            status = compare(f, prev_map[key])
 
-            findings_output.append({
-                "organ": curr.organ,
-                "condition": curr.condition,
-                "status": status,
-                "severity": curr.severity,
-                "size_mm": curr.size_mm
-            })
-
-            if status == "improved":
+            if status == "worsened":
                 impression_output.append(
-                    f"{curr.condition} in the {curr.organ} has improved compared to prior scan."
-                )
-            elif status == "worsened":
-                impression_output.append(
-                    f"{curr.condition} in the {curr.organ} has worsened compared to prior scan."
+                    f"{f.get('condition')} in {f.get('organ')} has worsened."
                 )
                 recommendations.append(
-                    f"Close monitoring recommended for worsening {curr.condition}."
+                    f"Monitor progression of {f.get('condition')}."
+                )
+            elif status == "improved":
+                impression_output.append(
+                    f"{f.get('condition')} in {f.get('organ')} has improved."
                 )
             else:
                 impression_output.append(
-                    f"{curr.condition} in the {curr.organ} is stable."
+                    f"{f.get('condition')} in {f.get('organ')} is stable."
                 )
 
-    current_keys = {finding_key(f) for f in current_scan.findings}
-    for key, prev in previous_map.items():
-        if key not in current_keys:
-            impression_output.append(
-                f"Previously noted {prev.condition} in the {prev.organ} has resolved."
-            )
+        findings_output.append({
+            "organ": f.get("organ", "unknown"),
+            "condition": f.get("condition", "unknown"),
+            "status": status,
+            "severity": normalize_severity(f.get("severity")),
+            "size_mm": f.get("size_mm")
+        })
 
     return {
         "findings": findings_output,
@@ -116,57 +127,53 @@ def generate_report(current_scan: Scan, previous_scans: List[Scan]):
         "recommendations": recommendations
     }
 
+
+# -----------------------------
+# API endpoint
+# -----------------------------
+
 @app.post("/generate-report")
-async def generate_radiology_report(request: Request):
+async def generate_report(request: Request):
     try:
         data = await request.json()
 
-        # flexible input handling
-        current_data = data.get("current_scan", {})
-        previous_data = data.get("previous_scans", [])
+        # support both single and batch input
+        if isinstance(data, dict):
+            data = [data]
 
-        if not isinstance(previous_data, list):
-            previous_data = []
+        predictions = []
 
-        current_findings_raw = current_data.get("findings", [])
+        for case in data:
+            if not isinstance(case, dict):
+                predictions.append({
+                    "findings": [],
+                    "impression": ["Invalid input format"],
+                    "recommendations": []
+                })
+                continue
 
-        previous_findings_raw = []
-        for scan in previous_data:
-            if isinstance(scan, dict):
-                previous_findings_raw.extend(scan.get("findings", []))
+            result = process_case(case)
+            predictions.append(result)
 
-        def safe_finding(f):
-            return Finding(
-                organ=str(f.get("organ", "unknown")),
-                condition=str(f.get("condition", "unknown")),
-                severity=normalize_severity(f.get("severity")),
-                size_mm=f.get("size_mm")
-            )
-
-        current_findings = [safe_finding(f) for f in current_findings_raw if isinstance(f, dict)]
-        previous_findings = [safe_finding(f) for f in previous_findings_raw if isinstance(f, dict)]
-
-        current_scan = Scan(findings=current_findings)
-        previous_scans = [Scan(findings=previous_findings)]
-
-        result = generate_report(current_scan, previous_scans)
-
-        return {
-            "predictions": [result]
-        }
+        return {"predictions": predictions}
 
     except Exception as e:
         return {
             "predictions": [
                 {
                     "findings": [],
-                    "impression": ["Unable to process input"],
+                    "impression": ["Error processing request"],
                     "recommendations": [],
                     "error": str(e)
                 }
             ]
         }
 
+
+# -----------------------------
+# Health check
+# -----------------------------
+
 @app.get("/")
-def health_check():
-    return {"status": "API is running"}
+def health():
+    return {"status": "running"}
