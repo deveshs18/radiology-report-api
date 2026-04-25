@@ -3,11 +3,13 @@ from fastapi import FastAPI, Request
 app = FastAPI()
 
 # -----------------------------
-# Normalization helpers
+# Helper functions
 # -----------------------------
 
 def normalize(text):
-    return str(text).lower() if text else ""
+    if not text:
+        return ""
+    return text.lower()
 
 
 def get_modality(text):
@@ -24,9 +26,9 @@ def get_modality(text):
 def get_body_part(text):
     text = normalize(text)
 
-    if any(x in text for x in ["brain", "head", "cranial"]):
+    if "brain" in text or "head" in text:
         return "brain"
-    if any(x in text for x in ["chest", "lung"]):
+    if "chest" in text or "lung" in text:
         return "chest"
     if "abdomen" in text:
         return "abdomen"
@@ -34,26 +36,14 @@ def get_body_part(text):
     return "other"
 
 
-def keyword_overlap(a, b):
-    words_a = set(normalize(a).split())
-    words_b = set(normalize(b).split())
-    return len(words_a & words_b)
-
-
-def is_relevant(curr_desc, prior_desc):
-    curr_body = get_body_part(curr_desc)
-    prior_body = get_body_part(prior_desc)
-
-    curr_mod = get_modality(curr_desc)
+def is_relevant(current_desc, prior_desc):
+    curr_mod = get_modality(current_desc)
     prior_mod = get_modality(prior_desc)
 
-    if curr_body == prior_body:
-        return True
-
-    if keyword_overlap(curr_desc, prior_desc) >= 2:
-        return True
-
-    if curr_mod == prior_mod and curr_body != "other" and prior_body != "other":
+    curr_body = get_body_part(current_desc)
+    prior_body = get_body_part(prior_desc)
+    
+    if curr_body == prior_body and curr_mod == prior_mod:
         return True
 
     return False
@@ -76,16 +66,16 @@ async def generate_report(request: Request):
             current = case.get("current_study", {})
             priors = case.get("prior_studies", [])
 
-            curr_desc = current.get("study_description", "")
+            current_desc = current.get("study_description", "")
 
             for prior in priors:
+                study_id = prior.get("study_id")
+                prior_desc = prior.get("study_description", "")
+
                 predictions.append({
                     "case_id": case_id,
-                    "study_id": prior.get("study_id"),
-                    "predicted_is_relevant": is_relevant(
-                        curr_desc,
-                        prior.get("study_description", "")
-                    )
+                    "study_id": study_id,
+                    "predicted_is_relevant": is_relevant(current_desc, prior_desc)
                 })
 
         return {"predictions": predictions}
@@ -93,6 +83,10 @@ async def generate_report(request: Request):
     except Exception:
         return {"predictions": []}
 
+
+# -----------------------------
+# Health check
+# -----------------------------
 
 @app.get("/")
 def health():
