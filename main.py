@@ -2,85 +2,93 @@ from fastapi import FastAPI, Request
 
 app = FastAPI()
 
-SEVERITY_RANK = {
-    "none": 0,
-    "mild": 1,
-    "moderate": 2,
-    "severe": 3
-}
+# -----------------------------
+# Helper functions
+# -----------------------------
+
+def normalize(text):
+    if not text:
+        return ""
+    return text.lower()
 
 
-def normalize(sev):
-    if not sev:
-        return "mild"
-    sev = str(sev).lower()
-    return sev if sev in SEVERITY_RANK else "mild"
+def get_modality(text):
+    text = normalize(text)
+    if "mri" in text:
+        return "mri"
+    if "ct" in text:
+        return "ct"
+    if "x-ray" in text or "xray" in text:
+        return "xray"
+    return "other"
 
 
-def compare(curr, prev):
-    c = SEVERITY_RANK.get(normalize(curr.get("severity")), 1)
-    p = SEVERITY_RANK.get(normalize(prev.get("severity")), 1)
+def get_body_part(text):
+    text = normalize(text)
 
-    if c > p:
-        return "worsened"
-    if c < p:
-        return "improved"
+    if "brain" in text or "head" in text:
+        return "brain"
+    if "chest" in text or "lung" in text:
+        return "chest"
+    if "abdomen" in text:
+        return "abdomen"
 
-    # fallback
-    return "stable"
+    return "other"
 
 
-def get_label(current_findings, previous_findings):
-    # simple heuristic: compare first matching finding
-    for curr in current_findings:
-        for prev in previous_findings:
-            if curr.get("organ") == prev.get("organ") and curr.get("condition") == prev.get("condition"):
-                return compare(curr, prev)
+def is_relevant(current_desc, prior_desc):
+    curr_mod = get_modality(current_desc)
+    prior_mod = get_modality(prior_desc)
 
-    # if nothing matches
-    if current_findings and not previous_findings:
-        return "new"
+    curr_body = get_body_part(current_desc)
+    prior_body = get_body_part(prior_desc)
 
-    return "stable"
+    # rule: same body part + same modality = relevant
+    if curr_body == prior_body and curr_mod == prior_mod:
+        return True
 
+    return False
+
+
+# -----------------------------
+# API endpoint
+# -----------------------------
 
 @app.post("/generate-report")
 async def generate_report(request: Request):
     try:
         data = await request.json()
-
-        # handle all formats
-        if isinstance(data, dict):
-            if "cases" in data:
-                cases = data["cases"]
-            else:
-                cases = [data]
-        else:
-            cases = data
+        cases = data.get("cases", [])
 
         predictions = []
 
         for case in cases:
-            current = case.get("current_scan", {})
-            previous_scans = case.get("previous_scans", [])
+            case_id = case.get("case_id")
+            current = case.get("current_study", {})
+            priors = case.get("prior_studies", [])
 
-            current_findings = current.get("findings", []) if isinstance(current, dict) else []
+            current_desc = current.get("study_description", "")
 
-            # 🔥 IMPORTANT: generate prediction PER previous scan
-            for prev in previous_scans:
-                prev_findings = prev.get("findings", []) if isinstance(prev, dict) else []
-
-                label = get_label(current_findings, prev_findings)
+            for prior in priors:
+                study_id = prior.get("study_id")
+                prior_desc = prior.get("study_description", "")
 
                 predictions.append({
-                    "label": label
+                    "case_id": case_id,
+                    "study_id": study_id,
+                    "predicted_is_relevant": is_relevant(current_desc, prior_desc)
                 })
 
         return {"predictions": predictions}
 
-    except Exception as e:
-        return {
-            "predictions": [
-                {"label": "stable"}
-            ]
-        }
+    except Exception:
+        return {"predictions": []}
+
+
+# -----------------------------
+# Health check
+# -----------------------------
+
+@app.get("/")
+def health():
+    return {"status": "running"}
