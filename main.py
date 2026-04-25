@@ -1,10 +1,9 @@
 from fastapi import FastAPI, Request
-from typing import List, Optional
 
 app = FastAPI()
 
 # -----------------------------
-# Helper functions
+# Helpers
 # -----------------------------
 
 SEVERITY_RANK = {
@@ -14,6 +13,7 @@ SEVERITY_RANK = {
     "severe": 3
 }
 
+
 def normalize_severity(value):
     if not value:
         return "mild"
@@ -22,8 +22,8 @@ def normalize_severity(value):
 
 
 def get_key(finding):
-    organ = finding.get("organ", "").lower()
-    condition = finding.get("condition", "").lower()
+    organ = str(finding.get("organ", "")).lower()
+    condition = str(finding.get("condition", "")).lower()
     return f"{organ}::{condition}"
 
 
@@ -31,46 +31,44 @@ def compare(current, previous):
     curr_sev = SEVERITY_RANK.get(normalize_severity(current.get("severity")), 1)
     prev_sev = SEVERITY_RANK.get(normalize_severity(previous.get("severity")), 1)
 
-    # severity comparison
     if curr_sev > prev_sev:
         return "worsened"
     if curr_sev < prev_sev:
         return "improved"
 
-    # size comparison (if available)
     curr_size = current.get("size_mm")
     prev_size = previous.get("size_mm")
 
-    if curr_size is not None and prev_size is not None:
-        try:
+    try:
+        if curr_size is not None and prev_size is not None:
             if float(curr_size) > float(prev_size):
                 return "worsened"
             if float(curr_size) < float(prev_size):
                 return "improved"
-        except:
-            pass
+    except:
+        pass
 
     return "stable"
 
 
 # -----------------------------
-# Core logic
+# Core Logic
 # -----------------------------
 
 def process_case(case):
     current = case.get("current_scan", {})
     previous = case.get("previous_scans", [])
 
-    current_findings = current.get("findings", []) if isinstance(current, dict) else []
-    previous_findings = []
+    current_findings = []
+    if isinstance(current, dict):
+        current_findings = current.get("findings", [])
 
-    # flatten previous scans
+    previous_findings = []
     if isinstance(previous, list):
         for scan in previous:
             if isinstance(scan, dict):
                 previous_findings.extend(scan.get("findings", []))
 
-    # build lookup map
     prev_map = {}
     for f in previous_findings:
         if isinstance(f, dict):
@@ -129,7 +127,7 @@ def process_case(case):
 
 
 # -----------------------------
-# API endpoint
+# FINAL API ENDPOINT
 # -----------------------------
 
 @app.post("/generate-report")
@@ -137,17 +135,24 @@ async def generate_report(request: Request):
     try:
         data = await request.json()
 
-        # support both single and batch input
+        # 🔥 Handle all formats
         if isinstance(data, dict):
-            data = [data]
+            if "cases" in data and isinstance(data["cases"], list):
+                cases = data["cases"]
+            else:
+                cases = [data]
+        elif isinstance(data, list):
+            cases = data
+        else:
+            cases = []
 
         predictions = []
 
-        for case in data:
+        for case in cases:
             if not isinstance(case, dict):
                 predictions.append({
                     "findings": [],
-                    "impression": ["Invalid input format"],
+                    "impression": ["Invalid input"],
                     "recommendations": []
                 })
                 continue
